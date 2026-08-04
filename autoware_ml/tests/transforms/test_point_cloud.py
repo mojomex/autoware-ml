@@ -12,6 +12,7 @@ from autoware_ml.transforms.point_cloud.filters import (
     AIP_X2_GEN2_EGO_CROP_BOXES,
     EgoCropBoxFilter,
     NebulaDownsampleMaskFilter,
+    RingOutlierFilter,
 )
 from autoware_ml.transforms.point_cloud.geometry import (
     GlobalRotScaleTrans,
@@ -330,6 +331,99 @@ class TestPointCloudTransforms:
         )(sample)
 
         np.testing.assert_allclose(output["points"], np.array([[0.0, 10.0, 0.0, 1.0]]))
+
+    def test_ring_outlier_filter_removes_short_walks_and_keeps_aligned_arrays(self):
+        sample = {
+            "points": np.array(
+                [
+                    [10.0, 0.0, 0.0, 1.0, 0.0],
+                    [10.1, 0.0, 0.0, 2.0, 0.0],
+                    [10.2, 0.0, 0.0, 3.0, 0.0],
+                    [20.0, 0.0, 0.0, 4.0, 0.0],
+                    [20.01, 0.0, 0.0, 5.0, 0.0],
+                ],
+                dtype=np.float32,
+            ),
+            "labels": np.array([10, 11, 12, 13, 14], dtype=np.int64),
+            "source_name": "LIDAR_FRONT_UPPER",
+        }
+
+        output = RingOutlierFilter(channel_dim=4, object_length_threshold=0.05)(sample)
+
+        np.testing.assert_allclose(
+            output["points"],
+            np.array(
+                [
+                    [10.0, 0.0, 0.0, 1.0, 0.0],
+                    [10.1, 0.0, 0.0, 2.0, 0.0],
+                    [10.2, 0.0, 0.0, 3.0, 0.0],
+                ],
+                dtype=np.float32,
+            ),
+        )
+        np.testing.assert_array_equal(output["labels"], np.array([10, 11, 12], dtype=np.int64))
+
+    def test_ring_outlier_filter_uses_concat_source_slices(self):
+        sample = {
+            "points": np.array(
+                [
+                    [10.0, 0.0, 0.0, 1.0, 0.0],
+                    [10.1, 0.0, 0.0, 2.0, 0.0],
+                    [10.2, 0.0, 0.0, 3.0, 0.0],
+                    [20.0, 0.0, 0.0, 4.0, 1.0],
+                    [20.01, 0.0, 0.0, 5.0, 1.0],
+                ],
+                dtype=np.float32,
+            ),
+            "labels": np.array([1, 2, 3, 4, 5], dtype=np.int64),
+            "lidar_sources": {
+                "LIDAR_FRONT_UPPER": {
+                    "sensor_token": "front",
+                    "translation": [0.0, 0.0, 0.0],
+                    "rotation": np.eye(3).tolist(),
+                },
+                "LIDAR_REAR_UPPER": {
+                    "sensor_token": "rear",
+                    "translation": [0.0, 0.0, 0.0],
+                    "rotation": np.eye(3).tolist(),
+                },
+            },
+            "lidar_sources_info": {
+                "sources": [
+                    {"sensor_token": "front", "idx_begin": 0, "length": 3},
+                    {"sensor_token": "rear", "idx_begin": 3, "length": 2},
+                ]
+            },
+        }
+
+        output = RingOutlierFilter(channel_dim=4, object_length_threshold=0.05)(sample)
+
+        # The front source is one 0.2 m walk and survives in full; the rear source spans only
+        # 0.01 m and is dropped. Unlike Autoware's CPU node, the CUDA kernel this transform
+        # mirrors makes a per-point decision, so the final point of the front walk is kept too.
+        np.testing.assert_allclose(output["points"], sample["points"][:3])
+        np.testing.assert_array_equal(output["labels"], np.array([1, 2, 3], dtype=np.int64))
+
+    def test_ring_outlier_filter_walk_is_bounded_by_the_window(self):
+        # A long, perfectly continuous walk: consecutive points are 0.01 m apart, so any walk of
+        # 11 points or fewer spans at most 0.10 m. With a threshold above that span every point is
+        # dropped, which only happens because the window bounds the walk -- the unbounded CPU walk
+        # would measure the full 0.29 m and keep everything.
+        num_points = 30
+        points = np.zeros((num_points, 5), dtype=np.float32)
+        points[:, 0] = 10.0 + 0.01 * np.arange(num_points)
+        sample = {"points": points.copy(), "source_name": "LIDAR_FRONT_UPPER"}
+
+        bounded = RingOutlierFilter(channel_dim=4, object_length_threshold=0.15, window_size=5)(
+            dict(sample, points=points.copy())
+        )
+        assert bounded["points"].shape[0] == 0
+
+        # Widening the window lets the same walk exceed the threshold again.
+        widened = RingOutlierFilter(channel_dim=4, object_length_threshold=0.15, window_size=20)(
+            dict(sample, points=points.copy())
+        )
+        assert widened["points"].shape[0] == num_points
 
     def test_ego_crop_box_filter_removes_ego_points_and_keeps_arrays_aligned(self):
         sample = {

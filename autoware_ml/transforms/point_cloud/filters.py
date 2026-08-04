@@ -275,6 +275,210 @@ class NebulaDownsampleMaskFilter(BaseTransform):
         return self._calibrations[lidar_name]
 
 
+class RingOutlierFilter(BaseTransform):
+    """Reproduce Autoware's CUDA ring outlier filter on loaded Cartesian points.
+
+    AIP X2 Gen2 runs ``autoware_cuda_pointcloud_preprocessor``, whose ring outlier filter is a
+    different algorithm from the CPU ``ring_outlier_filter_node``. The CUDA kernel
+    (``outlier_kernels.cu::ringOutlierFilterKernel``) makes a *per-point* decision using a
+    ``+/-window_size`` sliding window over the organized ring grid: it grows the largest walk that
+    passes through the point but stays inside the window, then keeps the point when that walk's
+    endpoints are at least ``object_length_threshold`` apart. The CPU node instead segments each
+    ring into unbounded walks and keeps or drops each walk as a unit.
+
+    The two disagree most on densely populated rings, where an unbounded walk runs far longer than
+    the window. Measured against ``pointcloud_before_sync`` from a CUDA-preprocessor recording, the
+    windowed algorithm reproduces the per-ring kept-point distribution more closely on every LiDAR
+    (weighted per-ring L1 error 1.12% vs 1.37%; 0.07-0.26% vs 0.49-1.09% on the six LiDARs without
+    dense rings).
+
+    Two approximations remain, both stemming from T4Dataset carrying only ego-motion-corrected
+    Cartesian points:
+
+    - The kernel gates on the *original* per-point ``azimuth``/``distance`` fields, which the
+      distortion corrector never rewrites. Those fields are absent from T4Dataset, so they are
+      recomputed from the Cartesian coordinates instead.
+    - The kernel's cluster test uses post-undistortion coordinates. That test is a distance between
+      two points, so it is invariant to the rigid sensor-to-ego transform and the supplied
+      coordinates can be used directly.
+    """
+
+    _required_keys = ["points"]
+
+    def __init__(
+        self,
+        *,
+        distance_ratio: float = 1.1,
+        object_length_threshold: float = 0.05,
+        max_rings_num: int = 128,
+        window_size: int = 5,
+        channel_dim: int = 4,
+        return_stats: bool = False,
+    ) -> None:
+        """Initialize the RingOutlierFilter transform.
+
+        Args:
+            distance_ratio: Maximum ratio between neighbouring point ranges for them to stay in the
+                same walk. Matches Autoware's ``distance_ratio``.
+            object_length_threshold: Minimum walk endpoint separation in metres for the walk to be
+                considered a real object. Matches Autoware's ``object_length_threshold``.
+            max_rings_num: Number of LiDAR rings. Points with channels outside this range are
+                dropped, matching ``organizeKernel``.
+            window_size: Half-width of the CUDA kernel's sliding window, in points. The deployed
+                kernel hard-codes 5.
+            channel_dim: Index of the per-point feature holding the ring/channel number.
+            return_stats: Whether to record per-source kept/input point counts on the sample.
+        """
+        self.distance_ratio = float(distance_ratio)
+        self.object_length_threshold = float(object_length_threshold)
+        self.max_rings_num = int(max_rings_num)
+        self.window_size = int(window_size)
+        self.channel_dim = int(channel_dim)
+        self.return_stats = return_stats
+
+    def transform(self, input_dict: dict[str, Any]) -> dict[str, Any]:
+        points = np.asarray(input_dict["points"], dtype=np.float32)
+        keep_mask = np.zeros(points.shape[0], dtype=bool)
+        stats = []
+
+        for source in _iter_pointcloud_sources(input_dict, points.shape[0]):
+            source_keep = self._source_keep_mask(points, source)
+            keep_mask[source.point_slice] = source_keep
+            if self.return_stats:
+                stats.append(
+                    {
+                        "source_name": source.name,
+                        "num_input_points": int(source_keep.size),
+                        "num_kept_points": int(source_keep.sum()),
+                    }
+                )
+
+        for key, value in list(input_dict.items()):
+            if (
+                isinstance(value, np.ndarray)
+                and value.ndim > 0
+                and value.shape[0] == points.shape[0]
+            ):
+                input_dict[key] = value[keep_mask]
+        if self.return_stats:
+            input_dict["ring_outlier_stats"] = stats
+        return input_dict
+
+    def _source_keep_mask(
+        self, points: npt.NDArray[np.float32], source: _SourceSlice
+    ) -> npt.NDArray[np.bool_]:
+        source_points = points[source.point_slice]
+        local_points = source_points[:, :3]
+        if source.translation is not None and source.rotation is not None:
+            local_points = (local_points - source.translation) @ source.rotation
+
+        channels = source_points[:, self.channel_dim].astype(np.int64)
+        return self._ring_outlier_keep_for_local_points(local_points, channels)
+
+    def _ring_outlier_keep_for_local_points(
+        self, local_points: npt.NDArray[np.float32], channels: npt.NDArray[np.int64]
+    ) -> npt.NDArray[np.bool_]:
+        """Compute the keep mask for one LiDAR's points expressed in its own frame."""
+        keep = np.zeros(local_points.shape[0], dtype=bool)
+        in_range = (channels >= 0) & (channels < self.max_rings_num)
+        if not in_range.any():
+            return keep
+
+        # Mirror organizeKernel: bucket points by ring, preserving acquisition order within a ring.
+        ordered = np.flatnonzero(in_range)[np.argsort(channels[in_range], kind="stable")]
+        rings = channels[ordered]
+        counts = np.bincount(rings, minlength=self.max_rings_num)
+        num_slots = int(counts.max())
+        if num_slots < 2:
+            return keep
+        slots = np.arange(rings.shape[0]) - np.repeat(
+            np.concatenate([[0], np.cumsum(counts)[:-1]]), counts
+        )
+
+        points = local_points[ordered].astype(np.float64, copy=False)
+        grid_points = np.zeros((self.max_rings_num, num_slots, 3), dtype=np.float64)
+        grid_azimuth = np.zeros((self.max_rings_num, num_slots), dtype=np.float64)
+        # Unfilled slots keep distance 0, which fails the ratio test and so terminates a walk --
+        # the same effect the kernel gets from gatherKernel zeroing padding slots.
+        grid_distance = np.zeros((self.max_rings_num, num_slots), dtype=np.float64)
+        grid_valid = np.zeros((self.max_rings_num, num_slots), dtype=bool)
+        grid_points[rings, slots] = points
+        grid_azimuth[rings, slots] = np.mod(
+            _nebula_azimuth_rad(points.astype(np.float32)), 2.0 * np.pi
+        )
+        grid_distance[rings, slots] = np.linalg.norm(points, axis=1)
+        grid_valid[rings, slots] = True
+
+        grid_keep = self._window_keep_mask(grid_azimuth, grid_distance, grid_points, grid_valid)
+        keep[ordered] = grid_keep[rings, slots]
+        return keep
+
+    def _same_walk(
+        self, azimuth: npt.NDArray[np.float64], distance: npt.NDArray[np.float64]
+    ) -> npt.NDArray[np.bool_]:
+        """Whether each pair of neighbouring slots belongs to the same walk."""
+        azimuth_diff = azimuth[:, 1:] - azimuth[:, :-1]
+        azimuth_diff = np.where(azimuth_diff < 0.0, azimuth_diff + 2.0 * np.pi, azimuth_diff)
+        near, far = distance[:, :-1], distance[:, 1:]
+        return (np.maximum(near, far) < np.minimum(near, far) * self.distance_ratio) & (
+            azimuth_diff < np.deg2rad(1.0)
+        )
+
+    def _window_keep_mask(
+        self,
+        azimuth: npt.NDArray[np.float64],
+        distance: npt.NDArray[np.float64],
+        points: npt.NDArray[np.float64],
+        valid: npt.NDArray[np.bool_],
+    ) -> npt.NDArray[np.bool_]:
+        """Vectorized transcription of ``ringOutlierFilterKernel`` over the organized ring grid.
+
+        The kernel's serial scan over ``k`` is unrolled: each iteration advances every point's
+        candidate walk by one slot, so ``2 * window_size`` vectorized steps cover the whole window.
+        """
+        num_rings, num_slots = azimuth.shape
+        same_walk = np.concatenate(
+            [self._same_walk(azimuth, distance), np.zeros((num_rings, 1), dtype=bool)], axis=1
+        )
+
+        slot = np.arange(num_slots)
+        window_start = np.maximum(slot - self.window_size, 0)
+        window_end = np.minimum(slot + self.window_size, num_slots)
+
+        walk_start = np.broadcast_to(window_start, (num_rings, num_slots)).copy()
+        walk_end = walk_start + 1
+        terminated = np.zeros((num_rings, num_slots), dtype=bool)
+
+        for step in range(2 * self.window_size):
+            k = window_start + step
+            active = (k <= window_end - 2) & ~terminated
+            if not active.any():
+                break
+            k_clipped = np.clip(k, 0, num_slots - 2)
+            linked = np.take_along_axis(
+                same_walk, np.broadcast_to(k_clipped, (num_rings, num_slots)), axis=1
+            )
+            # Linked: the walk extends. Otherwise it either ends here (the break past our own
+            # slot) or restarts just after the gap (the gap is still behind us).
+            walk_end = np.where(active & linked, walk_end + 1, walk_end)
+            terminated |= active & ~linked & (k >= slot)
+            restarted = active & ~linked & (k < slot)
+            walk_start = np.where(restarted, k_clipped + 1, walk_start)
+            walk_end = np.where(restarted, k_clipped + 2, walk_end)
+
+        last_slot = np.clip(walk_end - 1, 0, num_slots - 1)
+        squared_length = sum(
+            (
+                np.take_along_axis(points[..., axis], walk_start, axis=1)
+                - np.take_along_axis(points[..., axis], last_slot, axis=1)
+            )
+            ** 2
+            for axis in range(3)
+        )
+        is_cluster = squared_length >= self.object_length_threshold**2
+        return is_cluster & valid
+
+
 class EgoCropBoxFilter(BaseTransform):
     """Remove points falling inside the ego vehicle's crop boxes.
 
