@@ -45,6 +45,7 @@ from autoware_ml.tools.dataset.t4dataset.nebula_order_error import (
     _stamp_to_seconds,
 )
 from autoware_ml.transforms.point_cloud.filters import (
+    AIP_X2_GEN2_EGO_CROP_BOXES,
     NebulaDownsampleMaskFilter,
     RingOutlierFilter,
     _normalize_lidar_name,
@@ -58,7 +59,27 @@ _METHODS = (
     "ring_only",
     "filter_only_ring",
     "inverse_filter_ring",
+    # Recommended pipeline: Nebula mask then ego crop box, no ring filter.
+    "mask_crop",
+    # Same, but both decisions taken in pre-ego-motion-correction space, which is where the
+    # vehicle evaluates them. Output points stay ego-motion corrected either way.
+    "inverse_mask_crop",
 )
+
+
+def _crop_keep(ego_points: npt.NDArray[np.float64]) -> npt.NDArray[np.bool_]:
+    """Points surviving the AIP X2 Gen2 self and wheels negative crop boxes."""
+    inside = np.zeros(ego_points.shape[0], dtype=bool)
+    for x_min, y_min, z_min, x_max, y_max, z_max in AIP_X2_GEN2_EGO_CROP_BOXES:
+        inside |= (
+            (ego_points[:, 0] >= x_min)
+            & (ego_points[:, 0] <= x_max)
+            & (ego_points[:, 1] >= y_min)
+            & (ego_points[:, 1] <= y_max)
+            & (ego_points[:, 2] >= z_min)
+            & (ego_points[:, 2] <= z_max)
+        )
+    return ~inside
 
 
 @dataclass(frozen=True)
@@ -246,6 +267,8 @@ def _compare_record(
     method_keep = {
         "filter_only": np.zeros(points.shape[0], dtype=bool),
         "inverse_filter": np.zeros(points.shape[0], dtype=bool),
+        "mask_crop": np.zeros(points.shape[0], dtype=bool),
+        "inverse_mask_crop": np.zeros(points.shape[0], dtype=bool),
         "ring_only": np.zeros(points.shape[0], dtype=bool),
         "filter_only_ring": np.zeros(points.shape[0], dtype=bool),
         "inverse_filter_ring": np.zeros(points.shape[0], dtype=bool),
@@ -294,6 +317,13 @@ def _compare_record(
         )
         source_inverse_filter_ring_keep = _apply_ring_after_mask(
             ring_filter, current_local, channels, source_inverse_filter_keep
+        )
+        # Crop decided on corrected coordinates vs on the inverse-corrected ones the vehicle uses.
+        source_crop_keep = _crop_keep(source_points[:, :3].astype(np.float64))
+        source_raw_crop_keep = _crop_keep(raw_ego)
+        method_keep["mask_crop"][idx_begin:idx_end] = source_filter_only_keep & source_crop_keep
+        method_keep["inverse_mask_crop"][idx_begin:idx_end] = (
+            source_inverse_filter_keep & source_raw_crop_keep
         )
         method_keep["filter_only"][idx_begin:idx_end] = source_filter_only_keep
         method_keep["inverse_filter"][idx_begin:idx_end] = source_inverse_filter_keep
