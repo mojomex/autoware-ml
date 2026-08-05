@@ -523,14 +523,20 @@ class EgoCropBoxFilter(BaseTransform):
     step has to be reapplied to match the inference-time point distribution. It removes up to 18%
     of a single LiDAR's points (``rear_lower`` on AIP X2 Gen2).
 
-    Points are expected in the ego/``base_link`` frame, which is how T4Dataset stores them. The
-    boxes are applied to those coordinates directly, without inverting the ego-motion correction
-    first. On the vehicle the crop mask is computed *before* undistortion, so the two are not
-    equivalent, but the disagreement is small: measured against a recorded pipeline output, cropping
-    in corrected space wrongly removes 0.27% of points overall, and 7 of 8 LiDARs are within 0.006%.
-    The whole term is ``rear_lower`` (7.0%), whose returns sit just under the rear overhang where
-    undistortion can push a point across the box face. Inverting the correction first would recover
-    that, at the cost of putting an ego-motion inversion on the transform path.
+    Points are expected in the ego/``base_link`` frame, which is how T4Dataset stores them, and the
+    boxes are applied to those coordinates directly.
+
+    .. note::
+
+       On the vehicle the crop mask is computed *before* ego-motion correction, so deciding it on
+       corrected coordinates is an approximation. Reconstructing a recorded concatenated cloud from
+       an unfiltered T4Dataset, taking the mask and crop decisions in inverse-corrected space is
+       markedly closer in space: voxel IoU at 0.12 m rises from 0.702 to 0.878, even though the
+       plain point count is slightly worse (+0.32% vs +0.08%). Count alone does not capture this.
+
+       This transform does not invert the correction -- doing so needs per-point timestamps and ego
+       poses, which are not available on the transform path. See
+       ``autoware_ml/tools/dataset/t4dataset/compare_t4_to_concat.py`` for the measurement.
 
     Ordering note: if :class:`RingOutlierFilter` is used (it is not in the recommended pipeline),
     this transform must run **after** it. On the vehicle the crop is a mask that is only AND-ed into
