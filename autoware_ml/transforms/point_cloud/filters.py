@@ -278,6 +278,17 @@ class NebulaDownsampleMaskFilter(BaseTransform):
 class RingOutlierFilter(BaseTransform):
     """Reproduce Autoware's CUDA ring outlier filter on loaded Cartesian points.
 
+    .. warning::
+
+       **Not part of the recommended compatibility pipeline.** The upstream ring outlier filter is
+       being removed from the vehicle sensing pipeline: it misbehaves independently of which
+       implementation is used, so reproducing it faithfully reproduces a defect. Use
+       :class:`NebulaDownsampleMaskFilter` followed by :class:`EgoCropBoxFilter` instead.
+
+       This transform is retained because it is validated against the deployed kernel and is the
+       reference if the upstream filter is fixed and reinstated. Opt in explicitly; nothing
+       constructs it by default.
+
     AIP X2 Gen2 runs ``autoware_cuda_pointcloud_preprocessor``, whose ring outlier filter is a
     different algorithm from the CPU ``ring_outlier_filter_node``. The CUDA kernel
     (``outlier_kernels.cu::ringOutlierFilterKernel``) makes a *per-point* decision using a
@@ -488,12 +499,19 @@ class EgoCropBoxFilter(BaseTransform):
     step has to be reapplied to match the inference-time point distribution. It removes up to 18%
     of a single LiDAR's points (``rear_lower`` on AIP X2 Gen2).
 
-    Ordering matters. On the vehicle the crop is evaluated as a *mask* that is only AND-ed into the
-    output at the very end, so cropped points are still present as neighbours while the ring outlier
-    filter runs. Place this transform **after** :class:`RingOutlierFilter`; running it first
-    discards those neighbours and measurably changes the ring filter's decisions.
+    Points are expected in the ego/``base_link`` frame, which is how T4Dataset stores them. The
+    boxes are applied to those coordinates directly, without inverting the ego-motion correction
+    first. On the vehicle the crop mask is computed *before* undistortion, so the two are not
+    equivalent, but the disagreement is small: measured against a recorded pipeline output, cropping
+    in corrected space wrongly removes 0.27% of points overall, and 7 of 8 LiDARs are within 0.006%.
+    The whole term is ``rear_lower`` (7.0%), whose returns sit just under the rear overhang where
+    undistortion can push a point across the box face. Inverting the correction first would recover
+    that, at the cost of putting an ego-motion inversion on the transform path.
 
-    Points are expected in the ego/``base_link`` frame, which is how T4Dataset stores them.
+    Ordering note: if :class:`RingOutlierFilter` is used (it is not in the recommended pipeline),
+    this transform must run **after** it. On the vehicle the crop is a mask that is only AND-ed into
+    the output at the very end, so cropped points are still present as neighbours while the ring
+    filter runs; cropping first discards those neighbours and measurably changes its decisions.
     """
 
     _required_keys = ["points"]
