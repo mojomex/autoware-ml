@@ -1,0 +1,43 @@
+# @package sensing_filters
+
+# The AIP X2 Gen2 vehicle-side sensing filters, reapplied to a T4Dataset concatenated pointcloud.
+#
+# T4Dataset stores the concatenated cloud with only ego-motion correction applied, while on the
+# vehicle the sensing pipeline also masks and crops it before inference ever sees it. Splice this
+# block into a pointcloud pipeline right after loading to train on the same point distribution
+# inference gets. Load the per-point annotations first, so that they are dropped alongside the
+# points they label: the filters carry every per-point array in the sample through the same mask.
+#
+# Order within the block matters. The vehicle evaluates both filters on the raw sweep, so the
+# inversion runs first and both filters decide on the pre-correction coordinates it attaches.
+# Deciding on the corrected coordinates instead is worth 0.175 of voxel IoU while barely moving the
+# point count -- see the reconstruction numbers in the transforms' docstrings.
+#
+# The ring outlier filter is deliberately absent: it is being removed from the vehicle pipeline.
+#
+# Expects points loaded with the ring index (dim 4) and the per-point timestamp (dim 6) kept, and
+# samples carrying `lidar_sources` / `lidar_sources_info`. Where that metadata is missing the
+# inversion raises rather than quietly deciding in the wrong space.
+
+_target_: autoware_ml.transforms.base.TransformsCompose
+pipeline:
+  # Reconstruct where each point sat at its own acquisition time, from the per-point timestamp and
+  # the scene's interpolated ego poses. `points` are not rewritten; only the keep/drop decision
+  # moves into pre-correction space, and survivors keep their corrected coordinates.
+  - _target_: autoware_ml.transforms.point_cloud.ego_motion.InvertEgoMotionCorrection
+    timestamp_dim: 6
+    timestamp_unit: ns
+
+  # Nebula's decode-time downsample mask, indexed by raw azimuth and the stored ring index.
+  - _target_: autoware_ml.transforms.point_cloud.nebula_mask.NebulaDownsampleMaskFilter
+    channel_dim: 4
+    lidar_masks:
+      _target_: autoware_ml.transforms.point_cloud.nebula_mask_assets.load_lidar_masks
+      mask_root: aip_x2_gen2
+
+  # Vehicle body and the swept volume of the steered front wheels. The asset's header records how
+  # the boxes were derived from the platform's vehicle_info.
+  - _target_: autoware_ml.transforms.point_cloud.crop_box.CropBoxFilter
+    crop_boxes:
+      _target_: autoware_ml.transforms.point_cloud.crop_box.load_crop_boxes
+      path: aip_x2_gen2/crop_boxes.param.yaml

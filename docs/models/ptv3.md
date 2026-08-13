@@ -36,14 +36,21 @@ implementation so ONNX export remains supported.
 
 ## Available Configurations
 
-| Config Name                                          | Task                         | Dataset   | Head        | Range | Purpose                        |
-| ---------------------------------------------------- | ---------------------------- | --------- | ----------- | ----- | ------------------------------ |
-| `segmentation3d/ptv3/voxel005_51m_nuscenes`          | segmentation3d               | NuScenes  | Seg decoder | 51 m  | NuScenes segmentation          |
-| `segmentation3d/ptv3/voxel012_122m_t4dataset_j6gen2` | segmentation3d               | T4Dataset | Seg decoder | 122 m | T4Dataset segmentation         |
-| `detection3d/ptv3/voxel005_51m_nuscenes`             | detection3d                  | NuScenes  | TransFusion | 51 m  | NuScenes detection             |
-| `detection3d/ptv3/voxel012_122m_t4dataset_j6gen2`    | detection3d                  | T4Dataset | TransFusion | 122 m | T4Dataset detection            |
-| `multi/ptv3/voxel005_51m_nuscenes`                   | segmentation3d + detection3d | NuScenes  | TransFusion | 51 m  | Joint segmentation + detection |
-| `multi/ptv3/voxel012_122m_t4dataset_j6gen2`          | segmentation3d + detection3d | T4Dataset | TransFusion | 122 m | Joint segmentation + detection |
+| Config Name                                                          | Task                         | Dataset   | Head        | Range | Purpose                                     |
+| -------------------------------------------------------------------- | ---------------------------- | --------- | ----------- | ----- | ------------------------------------------- |
+| `segmentation3d/ptv3/voxel005_51m_nuscenes`                          | segmentation3d               | NuScenes  | Seg decoder | 51 m  | NuScenes segmentation                       |
+| `segmentation3d/ptv3/voxel012_122m_t4dataset_j6gen2`                 | segmentation3d               | T4Dataset | Seg decoder | 122 m | T4Dataset segmentation                      |
+| `segmentation3d/ptv3/voxel012_122m_t4dataset_j6gen2_sensing_filters` | segmentation3d               | T4Dataset | Seg decoder | 122 m | T4Dataset segmentation, AIP X2 Gen2 filters |
+| `detection3d/ptv3/voxel005_51m_nuscenes`                             | detection3d                  | NuScenes  | TransFusion | 51 m  | NuScenes detection                          |
+| `detection3d/ptv3/voxel012_122m_t4dataset_j6gen2`                    | detection3d                  | T4Dataset | TransFusion | 122 m | T4Dataset detection                         |
+| `multi/ptv3/voxel005_51m_nuscenes`                                   | segmentation3d + detection3d | NuScenes  | TransFusion | 51 m  | Joint segmentation + detection              |
+| `multi/ptv3/voxel012_122m_t4dataset_j6gen2`                          | segmentation3d + detection3d | T4Dataset | TransFusion | 122 m | Joint segmentation + detection              |
+
+The `_sensing_filters` variant trains on the point distribution inference actually sees: it reapplies
+the vehicle-side Nebula downsample mask and ego crop boxes that T4Dataset stores unfiltered. The
+filter block itself is `datamodule/transforms/aip_x2_gen2_sensing_filters`, reusable from any
+pointcloud pipeline. It needs infos carrying per-point ring and timestamp features together with
+`lidar_sources` / `lidar_sources_info`.
 
 ## Training
 
