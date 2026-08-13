@@ -35,9 +35,14 @@ from autoware_ml.transforms.point_cloud.ego_motion import InvertEgoMotionCorrect
 from autoware_ml.transforms.point_cloud.formatting import PreparePointCloudInput
 from autoware_ml.transforms.point_cloud.loading import LoadPointsFromFile
 from autoware_ml.transforms.point_cloud.nebula_mask import NebulaDownsampleMaskFilter
+from autoware_ml.transforms.point_cloud.sweeps import LoadPointsFromMultiSweeps
 
 CONFIG_NAME = "tasks/segmentation3d/ptv3/voxel012_122m_t4dataset_j6gen2_sensing_filters"
 BASE_CONFIG_NAME = "tasks/segmentation3d/ptv3/voxel012_122m_t4dataset_j6gen2"
+SWEEP_CONFIG_NAME = (
+    "tasks/detection3d/bevfusion/"
+    "lidar_voxel0170_second_secfpn_120m_t4dataset_j6gen2_sensing_filters"
+)
 
 # One LiDAR is enough to exercise the wiring; front_upper carries a 128 x 3600 mask.
 LIDAR_NAME = "front_upper"
@@ -206,6 +211,31 @@ class TestSensingFilterConfig:
         assert filtered["segment"].shape[0] == filtered["coord"].shape[0]
         assert filtered["strength"].shape[0] == filtered["coord"].shape[0]
         assert filtered["origin_segment"].shape[0] == filtered["origin_coord"].shape[0]
+
+    def test_multi_sweep_config_filters_the_frame_and_every_sweep(self) -> None:
+        # A sweep and the current frame are separate scans the vehicle filtered separately, so the
+        # block has to appear twice: once in the pipeline for the frame, once inside the sweep
+        # loader. Neither position can cover for the other.
+        cfg = compose_config(SWEEP_CONFIG_NAME)
+
+        for split in ("train_transforms", "val_transforms", "predict_transforms"):
+            pipeline = instantiate(cfg.datamodule[split]).pipeline
+            types = [type(transform) for transform in pipeline]
+            loader = pipeline[types.index(LoadPointsFromMultiSweeps)]
+
+            # The current frame is loaded explicitly and filtered before the sweep loader runs.
+            assert types.index(LoadPointsFromFile) < types.index(TransformsCompose), split
+            assert types.index(TransformsCompose) < types.index(LoadPointsFromMultiSweeps), split
+            # Every sweep goes through the same block.
+            assert [type(step) for step in loader.sweep_transforms.pipeline] == [
+                InvertEgoMotionCorrection,
+                NebulaDownsampleMaskFilter,
+                CropBoxFilter,
+            ], split
+            # The lag column is the one the filters read as a timestamp, so it can only be
+            # overwritten after they have run.
+            assert loader.time_dim == TIMESTAMP_DIM, split
+            assert tuple(loader.use_dim) == (0, 1, 2, 3, TIMESTAMP_DIM), split
 
     def test_crop_box_decides_in_pre_correction_space(self, tmp_path: Path) -> None:
         filters = instantiate(compose_config(CONFIG_NAME).datamodule.val_transforms).pipeline[2]

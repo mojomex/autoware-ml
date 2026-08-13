@@ -1,0 +1,114 @@
+# @package _global_
+
+# LiDAR BEVFusion on T4Dataset j6gen2, trained on the point distribution inference actually sees.
+#
+# Identical to /tasks/detection3d/bevfusion/lidar_voxel0170_second_secfpn_120m_t4dataset_j6gen2
+# apart from the transform pipelines. Each pipeline is restated in full because a list in a Hydra
+# override replaces the whole list rather than merging into it.
+#
+# Multi-sweep needs the filters in two places, because a sweep and the current frame are separate
+# scans that the vehicle filtered separately:
+#
+#   * the current frame is loaded explicitly and filtered in the pipeline, before the sweep loader.
+#     The parent config lets LoadPointsFromMultiSweeps load it implicitly, which would leave no step
+#     at which it could be filtered in its own frame.
+#   * the sweeps are filtered by the loader, via `sweep_transforms`. It moves each sweep into the
+#     current frame and overwrites the per-point timestamps with one per-sweep lag, so filtering
+#     afterwards would decide against the wrong crop faces with no timestamps left to read.
+#
+# The model input is unchanged at five features: `use_dim: [0, 1, 2, 3, 6]` selects x, y, z,
+# intensity and -- once the loader has rewritten column 6 -- the time lag, exactly the layout the
+# parent config produces from five raw features.
+#
+# Requires infos whose pointclouds carry [x, y, z, intensity, channel, return_type, timestamp_ns]
+# and which record `lidar_sources`, plus per-sweep concat metadata either in the infos or in the
+# LIDAR_CONCAT_INFO sidecars T4 writes beside every cloud. The filters raise on infos that do not,
+# rather than silently deciding on ego-motion-corrected coordinates.
+
+defaults:
+  - /tasks/detection3d/bevfusion/lidar_voxel0170_second_secfpn_120m_t4dataset_j6gen2
+  - /datamodule/transforms/aip_x2_gen2_sensing_filters
+  - _self_
+
+datamodule:
+  train_ann_file: info/segdet3d/t4dataset_j6gen2_segdet3d_infos_train.pkl
+  val_ann_file: info/segdet3d/t4dataset_j6gen2_segdet3d_infos_val.pkl
+  test_ann_file: info/segdet3d/t4dataset_j6gen2_segdet3d_infos_val.pkl
+  train_transforms:
+    pipeline:
+      - _target_: autoware_ml.transforms.boxes3d.merge.MergeObjects3D
+        merge_objects: ${dataset.detection3d.merge_objects}
+        name_mapping: ${dataset.detection3d.name_mapping}
+      - _target_: autoware_ml.transforms.boxes3d.loading.LoadAnnotations3D
+        name_mapping: ${dataset.detection3d.name_mapping}
+        filter_attributes: ${dataset.detection3d.filter_attributes}
+        use_valid_flag: ${dataset.detection3d.use_valid_flag}
+      - _target_: autoware_ml.transforms.point_cloud.loading.LoadPointsFromFile
+        load_dim: 7
+        use_dim: [0, 1, 2, 3, 4, 5, 6]
+      - ${sensing_filters}
+      - _target_: autoware_ml.transforms.point_cloud.sweeps.LoadPointsFromMultiSweeps
+        sweeps_num: 2
+        load_dim: 7
+        use_dim: [0, 1, 2, 3, 6]
+        time_dim: 6
+        pad_empty_sweeps: true
+        remove_close: true
+        sweep_transforms: ${sensing_filters}
+      - _target_: autoware_ml.transforms.point_cloud.geometry.GlobalRotScaleTrans
+        rot_range: [-0.78539816, 0.78539816]
+        scale_ratio_range: [0.95, 1.05]
+        translation_std: [0.5, 0.5, 0.2]
+      - _target_: autoware_ml.transforms.point_cloud.geometry.RandomFlip3D
+        flip_ratio_bev_horizontal: 0.5
+        flip_ratio_bev_vertical: 0.5
+      - _target_: autoware_ml.transforms.point_cloud.crop.PointsRangeFilter
+        point_cloud_range: ${point_cloud_range}
+      - _target_: autoware_ml.transforms.boxes3d.filters.ObjectRangeFilter
+        point_cloud_range: ${point_cloud_range}
+      - _target_: autoware_ml.transforms.boxes3d.filters.ObjectRangeMinPointsFilter
+        range_radius: [0.0, 60.0]
+        min_num_points: ${dataset.detection3d.train_min_points_near}
+      - _target_: autoware_ml.transforms.boxes3d.filters.ObjectRangeMinPointsFilter
+        range_radius: [60.0, 130.0]
+        min_num_points: ${dataset.detection3d.train_min_points_far}
+      - _target_: autoware_ml.transforms.point_cloud.sampling.PointShuffle
+  val_transforms:
+    pipeline:
+      - _target_: autoware_ml.transforms.boxes3d.merge.MergeObjects3D
+        merge_objects: ${dataset.detection3d.merge_objects}
+        name_mapping: ${dataset.detection3d.name_mapping}
+      - _target_: autoware_ml.transforms.boxes3d.loading.LoadAnnotations3D
+        name_mapping: ${dataset.detection3d.name_mapping}
+        filter_attributes: ${dataset.detection3d.filter_attributes}
+        use_valid_flag: ${dataset.detection3d.use_valid_flag}
+      - _target_: autoware_ml.transforms.point_cloud.loading.LoadPointsFromFile
+        load_dim: 7
+        use_dim: [0, 1, 2, 3, 4, 5, 6]
+      - ${sensing_filters}
+      - _target_: autoware_ml.transforms.point_cloud.sweeps.LoadPointsFromMultiSweeps
+        sweeps_num: 2
+        load_dim: 7
+        use_dim: [0, 1, 2, 3, 6]
+        time_dim: 6
+        pad_empty_sweeps: true
+        remove_close: true
+        sweep_transforms: ${sensing_filters}
+      - _target_: autoware_ml.transforms.point_cloud.crop.PointsRangeFilter
+        point_cloud_range: ${point_cloud_range}
+  predict_transforms:
+    pipeline:
+      - _target_: autoware_ml.transforms.point_cloud.loading.LoadPointsFromFile
+        load_dim: 7
+        use_dim: [0, 1, 2, 3, 4, 5, 6]
+      - ${sensing_filters}
+      - _target_: autoware_ml.transforms.point_cloud.sweeps.LoadPointsFromMultiSweeps
+        sweeps_num: 2
+        load_dim: 7
+        use_dim: [0, 1, 2, 3, 6]
+        time_dim: 6
+        pad_empty_sweeps: true
+        remove_close: true
+        sweep_transforms: ${sensing_filters}
+      - _target_: autoware_ml.transforms.point_cloud.crop.PointsRangeFilter
+        point_cloud_range: ${point_cloud_range}
