@@ -21,9 +21,10 @@
 # parent config produces from five raw features.
 #
 # Requires infos whose pointclouds carry [x, y, z, intensity, channel, return_type, timestamp_ns]
-# and which record `lidar_sources`, plus per-sweep concat metadata either in the infos or in the
-# LIDAR_CONCAT_INFO sidecars T4 writes beside every cloud. The filters raise on infos that do not,
-# rather than silently deciding on ego-motion-corrected coordinates.
+# and which record `lidar_sources`, plus per-sweep concat metadata -- either inline in the infos, or
+# named by `SampleData.info_filename` in the scene's own sample_data.json, which is where it is read
+# from for infos generated before that was propagated. The filters raise on infos that satisfy
+# neither, rather than silently deciding on ego-motion-corrected coordinates.
 
 defaults:
   - /tasks/detection3d/bevfusion/lidar_voxel0170_second_secfpn_120m_t4dataset_j6gen2
