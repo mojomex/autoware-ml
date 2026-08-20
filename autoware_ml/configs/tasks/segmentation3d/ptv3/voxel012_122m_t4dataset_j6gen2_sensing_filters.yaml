@@ -1,0 +1,111 @@
+# @package _global_
+
+# PTv3 segmentation on T4Dataset j6gen2, trained on the point distribution inference actually sees.
+#
+# Identical to /tasks/segmentation3d/ptv3/voxel012_122m_t4dataset_j6gen2 apart from the transform
+# pipelines, which keep the ring index and per-point timestamp when loading and then reapply the
+# AIP X2 Gen2 vehicle-side filters. Each pipeline is restated in full because a list in a Hydra
+# override replaces the whole list rather than merging into it.
+#
+# Requires infos whose pointclouds carry [x, y, z, intensity, channel, return_type, timestamp_ns]
+# and which record `lidar_sources` / `lidar_sources_info`. The filters raise on infos that do not,
+# rather than silently deciding on ego-motion-corrected coordinates, so point the annotation files
+# below at a dataset generated with those features.
+
+defaults:
+  - /tasks/segmentation3d/ptv3/voxel012_122m_t4dataset_j6gen2
+  - /datamodule/transforms/aip_x2_gen2_sensing_filters
+  - _self_
+
+datamodule:
+  train_transforms:
+    pipeline:
+      - _target_: autoware_ml.transforms.point_cloud.loading.LoadPointsFromFile
+        load_dim: 7
+        # The sensing filters index by ring (4) and per-point timestamp (6), so those features have
+        # to survive loading. PreparePointCloudInput still reads xyz and intensity off the first
+        # four, and everything downstream is unchanged.
+        use_dim: [0, 1, 2, 3, 4, 5, 6]
+      - _target_: autoware_ml.transforms.segmentation3d.loading.LoadSegAnnotations3D
+        class_mapping: ${dataset.segmentation3d.class_mapping}
+        ignore_index: ${dataset.segmentation3d.ignore_index}
+      # After the labels, so they are dropped alongside the points they label, and before anything
+      # that augments or subsamples: the filters reproduce a decision the vehicle made on the raw
+      # sweep, in the ego frame.
+      - ${sensing_filters}
+      - _target_: autoware_ml.transforms.point_cloud.formatting.PreparePointCloudInput
+      - _target_: autoware_ml.transforms.segmentation3d.formatting.PreparePointSegInput
+      - _target_: autoware_ml.transforms.point_cloud.geometry.GlobalRotScaleTrans
+        rot_range: [-3.14159, 3.14159]
+        scale_ratio_range: [0.9, 1.1]
+      - _target_: autoware_ml.transforms.point_cloud.geometry.RandomFlip3D
+        flip_ratio_bev_horizontal: 0.5
+        flip_ratio_bev_vertical: 0.5
+      - _target_: autoware_ml.transforms.point_cloud.crop.PointsRangeFilter
+        point_cloud_range: ${point_cloud_range}
+      - _target_: autoware_ml.transforms.point_cloud.perturbation.RandomJitter
+        sigma: 0.005
+        clip: 0.02
+      - _target_: autoware_ml.transforms.point_cloud.crop.SphereCrop
+        point_max: 128000
+        mode: random
+      - _target_: autoware_ml.transforms.common.copying.Copy
+        keys_dict: { segment: origin_segment, coord: origin_coord }
+      - _target_: autoware_ml.transforms.point_cloud.sampling.GridSample
+        grid_size: ${grid_size}
+        point_cloud_range: ${point_cloud_range}
+        hash_type: fnv
+        mode: train
+        keys: [coord, strength, segment]
+        return_inverse: true
+        return_grid_coord: true
+      - _target_: autoware_ml.transforms.common.packing.BuildPointFeatures
+        keys: [coord, strength]
+        output_key: feat
+  val_transforms:
+    pipeline:
+      - _target_: autoware_ml.transforms.point_cloud.loading.LoadPointsFromFile
+        load_dim: 7
+        use_dim: [0, 1, 2, 3, 4, 5, 6]
+      - _target_: autoware_ml.transforms.segmentation3d.loading.LoadSegAnnotations3D
+        class_mapping: ${dataset.segmentation3d.class_mapping}
+        ignore_index: ${dataset.segmentation3d.ignore_index}
+      - ${sensing_filters}
+      - _target_: autoware_ml.transforms.point_cloud.formatting.PreparePointCloudInput
+      - _target_: autoware_ml.transforms.segmentation3d.formatting.PreparePointSegInput
+      - _target_: autoware_ml.transforms.point_cloud.crop.PointsRangeFilter
+        point_cloud_range: ${point_cloud_range}
+      - _target_: autoware_ml.transforms.common.copying.Copy
+        keys_dict: { segment: origin_segment, coord: origin_coord }
+      - _target_: autoware_ml.transforms.point_cloud.sampling.GridSample
+        grid_size: ${grid_size}
+        point_cloud_range: ${point_cloud_range}
+        hash_type: fnv
+        mode: test
+        keys: [coord, strength, segment]
+        return_inverse: true
+        return_grid_coord: true
+      - _target_: autoware_ml.transforms.common.packing.BuildPointFeatures
+        keys: [coord, strength]
+        output_key: feat
+  predict_transforms:
+    pipeline:
+      - _target_: autoware_ml.transforms.point_cloud.loading.LoadPointsFromFile
+        load_dim: 7
+        use_dim: [0, 1, 2, 3, 4, 5, 6]
+      - ${sensing_filters}
+      - _target_: autoware_ml.transforms.point_cloud.formatting.PreparePointCloudInput
+      - _target_: autoware_ml.transforms.segmentation3d.formatting.PreparePointSegInput
+      - _target_: autoware_ml.transforms.point_cloud.crop.PointsRangeFilter
+        point_cloud_range: ${point_cloud_range}
+      - _target_: autoware_ml.transforms.point_cloud.sampling.GridSample
+        grid_size: ${grid_size}
+        point_cloud_range: ${point_cloud_range}
+        hash_type: fnv
+        mode: test
+        keys: [coord, strength]
+        return_inverse: true
+        return_grid_coord: true
+      - _target_: autoware_ml.transforms.common.packing.BuildPointFeatures
+        keys: [coord, strength]
+        output_key: feat
