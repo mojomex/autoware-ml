@@ -328,3 +328,55 @@ def test_ptv3_monolithic_export_contract_still_lists_every_tensor() -> None:
         "serialized_pooling_0_serialized_order",
         "serialized_pooling_0_serialized_inverse",
     ]
+
+
+@pytest.mark.xfail(
+    reason=(
+        "Known defect: a convolution-free stage never reads its sparse view, so the "
+        "tracer prunes serialized_pooling_i_head_indices and the declared contract "
+        "ends up 2 names wider than the LitePT graph. Narrowing it needs two coupled "
+        "changes: SerializedPooling must skip building the dead sparse view, and the "
+        "export-mode guard that reads point.offset must go (see the attention-window "
+        "fill PR), because head_indices also feeds batch and therefore offset."
+    ),
+    strict=True,
+)
+@REQUIRES_SPARSE_CUDA
+def test_declared_encoder_contract_matches_the_traced_graph() -> None:
+    """Round-trip the export: every declared input must survive tracing.
+
+    This is the check that a hardcoded expected-name list cannot make. The
+    exporter prunes graph inputs the traced model never consumes, so a contract
+    that declares more than the model reads produces an artifact whose interface
+    disagrees with its own graph - and a consumer binding by the declared list
+    then binds the wrong number of tensors.
+    """
+    import io
+
+    import onnx
+
+    for model in (build_litept_seg_model(), build_seg_model()):
+        model = model.cuda().eval()
+        batch = move_batch_to_device(build_inputs(), torch.device("cuda"))
+        spec = model.build_export_specs(batch)["encoder"]
+
+        buffer = io.BytesIO()
+        with torch.no_grad():
+            torch.onnx.export(
+                spec.module,
+                spec.args,
+                buffer,
+                input_names=spec.input_param_names,
+                output_names=list(spec.output_names),
+                dynamic_axes=spec.dynamic_axes,
+                opset_version=17,
+                do_constant_folding=False,
+                dynamo=False,
+            )
+        traced = [i.name for i in onnx.load_from_string(buffer.getvalue()).graph.input]
+
+        assert traced == list(spec.input_param_names), (
+            f"{type(model.encoder).__name__}: declared {len(spec.input_param_names)} inputs "
+            f"but the graph has {len(traced)}; "
+            f"pruned={sorted(set(spec.input_param_names) - set(traced))}"
+        )
