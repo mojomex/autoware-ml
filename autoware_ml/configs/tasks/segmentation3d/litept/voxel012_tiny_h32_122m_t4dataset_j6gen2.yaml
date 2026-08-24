@@ -1,0 +1,11 @@
+# @package _global_
+#
+# LitePT at ptv3-tiny scale with head_dim 32, on T4Dataset J6Gen2 at 122 m.
+# Dataset, transforms, optimizer, schedule and deploy settings are inherited from the
+# PTv3 config of the same scale; only the encoder and decoder head are swapped, so any
+# measured difference is attributable to the architecture rather than the recipe.
+defaults:
+  - /tasks/segmentation3d/ptv3/voxel012_122m_t4dataset_j6gen2
+  - /tasks/segmentation3d/litept/encoder_tiny
+  - /tasks/segmentation3d/litept/seg_head_tiny
+  - _self_

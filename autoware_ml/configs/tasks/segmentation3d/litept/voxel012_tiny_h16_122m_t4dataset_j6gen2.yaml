@@ -1,0 +1,16 @@
+# @package _global_
+#
+# As voxel012_tiny_h32, but keeping ptv3-tiny's original head counts so head_dim is 16.
+# The axis-split RoPE then rotates 12 of 16 dims per head, leaving 25% unrotated. Paired
+# with the h32 variant this isolates the head-count choice: attention FLOPs are identical
+# between them, while the attention logits tensor doubles, so the pair measures both the
+# latency effect of that tensor and the accuracy cost of the narrower head.
+defaults:
+  - /tasks/segmentation3d/litept/voxel012_tiny_h32_122m_t4dataset_j6gen2
+  - _self_
+
+model:
+  encoder:
+    enc_num_head: [2, 4, 8, 16, 32]
+  seg3d_head:
+    dec_num_head: [4, 4, 8, 16]

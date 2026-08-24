@@ -1,0 +1,36 @@
+# @package model.encoder
+#
+# LitePT at the ptv3-tiny scale: identical depths, channel widths, patch sizes and
+# serialization orders, differing only in which operations run at which resolution
+# (stages 0-2 convolution, stages 3-4 attention with rotary embedding).
+#
+# enc_num_head is halved relative to ptv3-tiny so head_dim is 32 rather than 16. The
+# axis-split RoPE rotates the largest multiple of six that fits, so head_dim 16 would
+# leave 4 of 16 dims unrotated (25%) against 2 of 32 (6.25%). Attention FLOPs are
+# invariant to head count at fixed channels, and the attention logits tensor is linear
+# in it, so this is not a latency trade either way. The `_h16` variant keeps tiny's
+# original head counts for a direct measurement of that choice.
+_target_: autoware_ml.models.segmentation3d.encoders.ptv3.LitePTEncoder
+in_channels: 4
+order: [z, z-trans, hilbert, hilbert-trans]
+stride: [2, 2, 2, 2]
+enc_depths: [2, 2, 2, 2, 2]
+enc_channels: [32, 64, 128, 256, 512]
+enc_num_head: [1, 2, 4, 8, 16]
+enc_patch_size: [512, 512, 512, 512, 512]
+enc_conv: [true, true, true, false, false]
+enc_attn: [false, false, false, true, true]
+enc_rope_base: 100.0
+mlp_ratio: 4
+qkv_bias: true
+qk_scale: null
+attn_drop: 0.0
+proj_drop: 0.0
+drop_path: 0.3
+pre_norm: true
+shuffle_orders: true
+enable_rpe: false
+enable_flash: true
+upcast_attention: false
+upcast_softmax: false
+stem_type: linear
